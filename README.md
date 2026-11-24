@@ -37,10 +37,7 @@ bookmarks, SyncTeX, ruler mode and so on). If you rely on those, stay where you
 are. folio is for reading PDFs, mostly papers, with the handful of things I
 actually use done properly.
 
-> **Heads up:** almost all of the code here was written by Claude (Anthropic's
-> AI model) over a long session with me directing it. I use folio every day, but
-> I have **not** properly reviewed the code yet. It works on my machine; it might
-> misbehave on yours. Treat it accordingly, and issues/PRs are very welcome.
+> **Heads up:** almost all of the code here was written by Claude over a long session with me directing it. I use folio every day, but I have **not** properly reviewed the code yet. It works on my machine; it might misbehave on yours. Treat it accordingly, and issues/PRs are very welcome.
 
 ## What it does
 
