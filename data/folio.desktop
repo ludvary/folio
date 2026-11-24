@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=folio
+GenericName=PDF Viewer
+Comment=Keyboard-driven PDF viewer with citation previews
+Exec=folio %f
+Icon=folio
+Terminal=false
+Categories=Office;Viewer;
+MimeType=application/pdf;
+Keywords=pdf;viewer;reader;vim;papers;
+StartupWMClass=folio
