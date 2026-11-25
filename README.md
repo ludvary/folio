@@ -11,7 +11,8 @@ home: `j`/`k`, counts like `5j`, `gg`/`G`, `/` search, `d` for double page,
 `Ctrl-r` to recolour. On top of that you get:
 
 - right-click a citation and the reference pops up, without losing your place
-- highlights
+- highlights that are saved in the PDF itself, so they show up in Firefox,
+  Evince, Okular and everything else
 - a fuzzy finder over every PDF under the folder you started in, recent files
   first, instead of typing out paths
 - themes you can switch and tweak (page background, text colour) from inside the
@@ -37,7 +38,10 @@ bookmarks, SyncTeX, ruler mode and so on). If you rely on those, stay where you
 are. folio is for reading PDFs, mostly papers, with the handful of things I
 actually use done properly.
 
-> **Heads up:** almost all of the code here was written by Claude over a long session with me directing it. I use folio every day, but I have **not** properly reviewed the code yet. It works on my machine; it might misbehave on yours. Treat it accordingly, and issues/PRs are very welcome.
+> **Heads up:** almost all of the code here was written by Claude (Anthropic's
+> AI model) over a long session with me directing it. I use folio every day, but
+> I have **not** properly reviewed the code yet. It works on my machine; it might
+> misbehave on yours. Treat it accordingly, and issues/PRs are very welcome.
 
 ## What it does
 
@@ -47,7 +51,9 @@ actually use done properly.
   linked citations, and makes a decent guess for unlinked ones like `[12]`,
   `Ref. 12`, superscripts and `Smith et al. (2019)`
 - text selection that works across pages, `y` to copy
-- highlights in five colours, kept outside the PDF so your files are never touched
+- highlights in five colours, saved into the PDF as standard annotations. They
+  travel with the file (Syncthing, Dropbox, email) and other viewers show them.
+  Highlights made in other apps show up in folio too
 - `/` search with `n`/`N`, smartcase, matches across line breaks
 - fuzzy finder for PDFs with your recent files on top; reopens where you left off
 - a file tree, if you want one
@@ -111,7 +117,7 @@ directory; from a launcher, in your home folder.
 
 - `~/.config/folio/config.ini` – settings (theme, status bar, custom page colours)
 - `~/.config/folio/themes/*.ini` – your own themes
-- `~/.local/share/folio/` – recent files and highlights
+- `~/.local/share/folio/` – recent files and where you left off
 - `~/.cache/folio/` – the list of PDFs the finder searches, safe to delete
 
 A theme is just a few colours on top of an existing one:
@@ -125,12 +131,27 @@ ink   = #fbf1c7   ; page text
 
 Other keys: `canvas`, `surface`, `border`, `fg`, `muted`, `accent`.
 
+## About writing to your PDFs
+
+Highlighting is the only thing that modifies a PDF. folio uses PDF's incremental
+saves, which only append to the end of the file and leave every existing byte
+alone, so a crash mid-save can't damage what's already there. If a file can't be
+saved that way (some broken PDFs), folio writes a complete copy next to it and
+swaps it in. Before saving, it also checks the file hasn't changed on disk since
+you opened it (say, Syncthing just synced an edit from your laptop) and refuses
+to save if it has, instead of guessing.
+
+Highlights from older versions of folio, which kept them in
+`~/.local/share/folio/highlights/`, are moved into the PDF the first time you
+open it.
+
 ## Known rough edges
 
 - pages render on the main thread, so very heavy scanned pages can stutter
 - the first search in a document reads every page (about 1 ms each)
 - the unlinked-citation matching is heuristic and will miss odd reference styles
-- highlights don't show up in other PDF viewers (no export yet)
+- if you highlight the same PDF on two machines before they sync, Syncthing
+  will keep both versions as a conflict file rather than merging them
 - only tested on Linux, X11 (bspwm)
 
 ## License

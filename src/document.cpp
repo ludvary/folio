@@ -4,12 +4,16 @@
 #include "document.h"
 
 #include <mupdf/fitz.h>
+#include <mupdf/pdf.h>
 
 #include <QFile>
+#include <QFileInfo>
 #include <QHash>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cerrno>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 
@@ -20,9 +24,45 @@ struct Document::TextCache {
 
 namespace {
 fz_point toFz(QPointF p) { return fz_make_point(float(p.x()), float(p.y())); }
+
+QColor annotColor(fz_context* ctx, pdf_annot* annot)
+{
+    int n = 0;
+    float c[4] = {};
+    pdf_annot_color(ctx, annot, &n, c);
+    if (n == 1)
+        return QColor::fromRgbF(c[0], c[0], c[0]);
+    if (n == 3)
+        return QColor::fromRgbF(c[0], c[1], c[2]);
+    if (n == 4)
+        return QColor::fromCmykF(c[0], c[1], c[2], c[3]);
+    return QColor("#f5d547"); // no colour set: the usual highlighter yellow
 }
 
-Document::Document(const QString& path) : m_text(std::make_unique<TextCache>())
+// The highlight annotations of one page.
+void readHighlights(fz_context* ctx, fz_page* page, int pageNumber, QList<Highlight>& out)
+{
+    pdf_page* pdfPage = pdf_page_from_fz_page(ctx, page);
+    if (!pdfPage)
+        return;
+    for (pdf_annot* a = pdf_first_annot(ctx, pdfPage); a; a = pdf_next_annot(ctx, a)) {
+        if (pdf_annot_type(ctx, a) != PDF_ANNOT_HIGHLIGHT)
+            continue;
+        Highlight h;
+        h.page = pageNumber;
+        h.color = annotColor(ctx, a);
+        h.id = pdf_to_num(ctx, pdf_annot_obj(ctx, a));
+        for (int i = 0; i < pdf_annot_quad_point_count(ctx, a); ++i) {
+            const fz_quad q = pdf_annot_quad_point(ctx, a, i);
+            h.quads.append(QPolygonF({{q.ul.x, q.ul.y}, {q.ur.x, q.ur.y}, {q.lr.x, q.lr.y}, {q.ll.x, q.ll.y}}));
+        }
+        if (!h.quads.isEmpty())
+            out.append(h);
+    }
+}
+} // namespace
+
+Document::Document(const QString& path) : m_text(std::make_unique<TextCache>()), m_path(path)
 {
     m_ctx = fz_new_context(nullptr, nullptr, FZ_STORE_DEFAULT);
     if (!m_ctx)
@@ -39,6 +79,7 @@ Document::Document(const QString& path) : m_text(std::make_unique<TextCache>())
         for (int i = 0; i < n; ++i) {
             fz_page* page = fz_load_page(m_ctx, m_doc, i);
             const fz_rect r = fz_bound_page(m_ctx, page);
+            readHighlights(m_ctx, page, i, m_highlights);
             fz_drop_page(m_ctx, page);
             m_pageBounds.emplace_back(QPointF(r.x0, r.y0), QPointF(r.x1, r.y1));
             m_maxPageWidth = std::max(m_maxPageWidth, double(r.x1 - r.x0));
@@ -53,6 +94,7 @@ Document::Document(const QString& path) : m_text(std::make_unique<TextCache>())
         fz_drop_context(m_ctx);
         throw std::runtime_error(error.empty() ? "document has no pages" : error);
     }
+    rememberFileState();
 }
 
 Document::~Document()
@@ -66,19 +108,42 @@ Document::~Document()
 QImage Document::render(int page, double scale) const
 {
     QImage image;
+    fz_page* p = nullptr;
     fz_pixmap* pix = nullptr;
+    fz_device* dev = nullptr;
+    fz_var(p);
     fz_var(pix);
+    fz_var(dev);
 
     fz_try(m_ctx) {
-        pix = fz_new_pixmap_from_page_number(m_ctx, m_doc, page, fz_scale(scale, scale),
-                                             fz_device_rgb(m_ctx), 0);
+        p = fz_load_page(m_ctx, m_doc, page);
+        const fz_matrix ctm = fz_scale(scale, scale);
+        const fz_irect box = fz_round_rect(fz_transform_rect(fz_bound_page(m_ctx, p), ctm));
+        pix = fz_new_pixmap_with_bbox(m_ctx, fz_device_rgb(m_ctx), box, nullptr, 0);
+        fz_clear_pixmap_with_value(m_ctx, pix, 0xff);
+        dev = fz_new_draw_device(m_ctx, fz_identity, pix);
+
+        // Everything except highlight annotations, which the view draws itself.
+        fz_run_page_contents(m_ctx, p, dev, ctm, nullptr);
+        if (pdf_page* pdfPage = pdf_page_from_fz_page(m_ctx, p)) {
+            for (pdf_annot* a = pdf_first_annot(m_ctx, pdfPage); a; a = pdf_next_annot(m_ctx, a))
+                if (pdf_annot_type(m_ctx, a) != PDF_ANNOT_HIGHLIGHT)
+                    pdf_run_annot(m_ctx, a, dev, ctm, nullptr);
+        } else {
+            fz_run_page_annots(m_ctx, p, dev, ctm, nullptr);
+        }
+        fz_run_page_widgets(m_ctx, p, dev, ctm, nullptr);
+        fz_close_device(m_ctx, dev);
+
         // Deep copy: the pixmap's memory is freed below.
         image = QImage(fz_pixmap_samples(m_ctx, pix), fz_pixmap_width(m_ctx, pix),
                        fz_pixmap_height(m_ctx, pix), fz_pixmap_stride(m_ctx, pix),
                        QImage::Format_RGB888).copy();
     }
     fz_always(m_ctx) {
+        fz_drop_device(m_ctx, dev);
         fz_drop_pixmap(m_ctx, pix);
+        fz_drop_page(m_ctx, p);
     }
     fz_catch(m_ctx) {
         std::fprintf(stderr, "folio: failed to render page %d: %s\n", page + 1,
@@ -262,4 +327,205 @@ std::optional<LinkTarget> Document::linkAt(int page, QPointF point) const
                      fz_convert_error(m_ctx, nullptr));
     }
     return target;
+}
+
+// --- highlights (PDF annotations) ---------------------------------------------
+
+bool Document::canAnnotate() const
+{
+    return pdf_specifics(m_ctx, m_doc) != nullptr;
+}
+
+QString Document::highlightText(const Highlight& h) const
+{
+    // Select from the middle of the first quad's left edge to the middle of the
+    // last one's right edge; MuPDF's selection handles ligatures and line breaks.
+    const QPolygonF& first = h.quads.first();
+    const QPolygonF& last = h.quads.last();
+    const QPointF a = (first[0] + first[3]) / 2; // ul, ll
+    const QPointF b = (last[1] + last[2]) / 2;   // ur, lr
+    return selectionText(h.page, a, b, SelectMode::Chars).simplified();
+}
+
+void Document::rememberFileState()
+{
+    const QFileInfo info(m_path);
+    m_fileTime = info.lastModified();
+    m_fileSize = info.size();
+}
+
+QString Document::checkUnchanged() const
+{
+    const QFileInfo info(m_path);
+    if (info.lastModified() != m_fileTime || info.size() != m_fileSize)
+        return QString("%1 changed on disk (synced from elsewhere?). Reopen it with o, then try again.")
+            .arg(info.fileName());
+    return {};
+}
+
+QString Document::save()
+{
+    pdf_document* pdf = pdf_specifics(m_ctx, m_doc);
+    // Incremental saves append to the file and never touch the existing bytes.
+    // Files that can't take one (e.g. repaired ones) get a full copy written
+    // next to them and renamed over the original, so it's never half-written.
+    const bool incremental = pdf_can_be_saved_incrementally(m_ctx, pdf);
+    const QString target = incremental ? m_path : m_path + ".folio-tmp";
+    const QByteArray file = QFile::encodeName(target);
+    pdf_write_options options = pdf_default_write_options;
+    options.do_incremental = incremental;
+
+    std::string error;
+    fz_try(m_ctx) {
+        pdf_save_document(m_ctx, pdf, file.constData(), &options);
+    }
+    fz_catch(m_ctx) {
+        error = fz_convert_error(m_ctx, nullptr);
+    }
+    if (!error.empty()) {
+        if (!incremental)
+            QFile::remove(target);
+        return QString("Couldn't save highlights: %1").arg(QString::fromStdString(error));
+    }
+    if (!incremental && std::rename(file.constData(), QFile::encodeName(m_path).constData()) != 0) {
+        QFile::remove(target);
+        return QString("Couldn't save highlights: %1").arg(std::strerror(errno));
+    }
+    // The in-memory document still describes the file as it was when opened.
+    // Saving again from it would write an update that points into the wrong
+    // places (MuPDF's own viewer reloads after saving for the same reason).
+    return reload();
+}
+
+QString Document::reload()
+{
+    const QByteArray file = QFile::encodeName(m_path);
+    fz_document* fresh = nullptr;
+    QList<Highlight> highlights;
+    std::string error;
+    fz_var(fresh);
+    fz_try(m_ctx) {
+        fresh = fz_open_document(m_ctx, file.constData());
+        for (int i = 0; i < pageCount(); ++i) {
+            fz_page* page = fz_load_page(m_ctx, fresh, i);
+            fz_try(m_ctx) {
+                readHighlights(m_ctx, page, i, highlights);
+            }
+            fz_always(m_ctx) {
+                fz_drop_page(m_ctx, page);
+            }
+            fz_catch(m_ctx) {
+                fz_rethrow(m_ctx);
+            }
+        }
+    }
+    fz_catch(m_ctx) {
+        fz_drop_document(m_ctx, fresh);
+        error = fz_convert_error(m_ctx, nullptr);
+    }
+    if (!error.empty())
+        return QString("Saved, but couldn't reload %1: %2. Reopen it before highlighting again.")
+            .arg(QFileInfo(m_path).fileName(), QString::fromStdString(error));
+    fz_drop_document(m_ctx, m_doc);
+    m_doc = fresh;
+    m_highlights = highlights;
+    rememberFileState();
+    return {};
+}
+
+// Runs fn(pdf_page*, pdf_annot*) on the annotation behind `h`.
+template <typename Fn>
+QString Document::editAnnotation(const Highlight& h, Fn fn)
+{
+    std::string error;
+    fz_page* page = nullptr;
+    fz_var(page);
+    fz_try(m_ctx) {
+        page = fz_load_page(m_ctx, m_doc, h.page);
+        pdf_page* pdfPage = pdf_page_from_fz_page(m_ctx, page);
+        for (pdf_annot* a = pdfPage ? pdf_first_annot(m_ctx, pdfPage) : nullptr; a; a = pdf_next_annot(m_ctx, a)) {
+            if (pdf_to_num(m_ctx, pdf_annot_obj(m_ctx, a)) == h.id) {
+                fn(pdfPage, a);
+                break;
+            }
+        }
+    }
+    fz_always(m_ctx) {
+        fz_drop_page(m_ctx, page);
+    }
+    fz_catch(m_ctx) {
+        error = fz_convert_error(m_ctx, nullptr);
+    }
+    return error.empty() ? QString() : QString::fromStdString(error);
+}
+
+QString Document::addHighlights(const QList<Highlight>& highlights)
+{
+    if (!canAnnotate())
+        return "Highlights can only be saved in PDF files.";
+    if (const QString changed = checkUnchanged(); !changed.isEmpty())
+        return changed;
+
+    for (Highlight h : highlights) {
+        std::string error;
+        fz_page* page = nullptr;
+        pdf_annot* annot = nullptr;
+        fz_var(page);
+        fz_var(annot);
+        fz_try(m_ctx) {
+            page = fz_load_page(m_ctx, m_doc, h.page);
+            annot = pdf_create_annot(m_ctx, pdf_page_from_fz_page(m_ctx, page), PDF_ANNOT_HIGHLIGHT);
+            std::vector<fz_quad> quads;
+            for (const QPolygonF& q : h.quads)
+                quads.push_back({toFz(q[0]), toFz(q[1]), toFz(q[3]), toFz(q[2])}); // ul ur ll lr
+            pdf_set_annot_quad_points(m_ctx, annot, int(quads.size()), quads.data());
+            const float rgb[3] = {float(h.color.redF()), float(h.color.greenF()), float(h.color.blueF())};
+            pdf_set_annot_color(m_ctx, annot, 3, rgb);
+            pdf_update_annot(m_ctx, annot); // builds the appearance other viewers draw
+            h.id = pdf_to_num(m_ctx, pdf_annot_obj(m_ctx, annot));
+        }
+        fz_always(m_ctx) {
+            pdf_drop_annot(m_ctx, annot);
+            fz_drop_page(m_ctx, page);
+        }
+        fz_catch(m_ctx) {
+            error = fz_convert_error(m_ctx, nullptr);
+        }
+        if (!error.empty())
+            return QString("Couldn't add highlight: %1").arg(QString::fromStdString(error));
+        m_highlights.append(h);
+    }
+    return save();
+}
+
+QString Document::removeHighlight(int index)
+{
+    if (index < 0 || index >= m_highlights.size())
+        return {};
+    if (const QString changed = checkUnchanged(); !changed.isEmpty())
+        return changed;
+    const QString error = editAnnotation(m_highlights[index], [this](pdf_page* page, pdf_annot* a) {
+        pdf_delete_annot(m_ctx, page, a);
+    });
+    if (!error.isEmpty())
+        return QString("Couldn't delete highlight: %1").arg(error);
+    m_highlights.removeAt(index);
+    return save();
+}
+
+QString Document::setHighlightColor(int index, const QColor& color)
+{
+    if (index < 0 || index >= m_highlights.size())
+        return {};
+    if (const QString changed = checkUnchanged(); !changed.isEmpty())
+        return changed;
+    const QString error = editAnnotation(m_highlights[index], [this, &color](pdf_page*, pdf_annot* a) {
+        const float rgb[3] = {float(color.redF()), float(color.greenF()), float(color.blueF())};
+        pdf_set_annot_color(m_ctx, a, 3, rgb);
+        pdf_update_annot(m_ctx, a);
+    });
+    if (!error.isEmpty())
+        return QString("Couldn't recolor highlight: %1").arg(error);
+    m_highlights[index].color = color;
+    return save();
 }

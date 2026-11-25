@@ -53,6 +53,5 @@ private:
     QList<Theme> m_themes;
     Theme m_theme;
     bool m_originalColors = false; // Ctrl-r
-    std::shared_ptr<Highlights> m_highlights;
     bool m_finderShowsFiles = false;
 };

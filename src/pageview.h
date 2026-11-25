@@ -20,8 +20,9 @@
 class PageView : public QAbstractScrollArea {
     Q_OBJECT
 public:
-    PageView(std::shared_ptr<Document> doc, std::shared_ptr<Highlights> highlights, int startPage,
-             QWidget* parent = nullptr);
+    PageView(std::shared_ptr<Document> doc, int startPage, QWidget* parent = nullptr);
+
+    const Document& document() const { return *m_doc; }
 
     int currentPage() const; // page under the viewport's center
     void setTheme(const Theme& theme);
@@ -96,7 +97,6 @@ private:
     void showLinkPreview(const LinkTarget& target, QPoint globalPos);
 
     std::shared_ptr<Document> m_doc;
-    std::shared_ptr<Highlights> m_highlights;
     bool m_inPreview = false; // q / Esc close the preview instead of the window
     std::optional<LinkTarget> m_pendingTarget; // applied once the first layout exists
     double m_zoom = 1.0;      // logical pixels per point

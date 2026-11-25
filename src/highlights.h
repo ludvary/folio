@@ -3,20 +3,14 @@
 
 #pragma once
 
+#include "document.h"
+
 #include <QColor>
 #include <QList>
-#include <QPolygonF>
 #include <QString>
 #include <array>
 
-struct Highlight {
-    int page = 0;
-    QList<QPolygonF> quads; // page coordinates
-    QString text;
-    int color = 0;          // index into kHighlightColors
-};
-
-// Drawn translucent over the page.
+// The colours `1a` … `5a` use, drawn translucent over the page.
 inline const std::array<QColor, 5> kHighlightColors = {
     QColor("#f5d547"), // 1 yellow
     QColor("#7ccf6a"), // 2 green
@@ -25,21 +19,7 @@ inline const std::array<QColor, 5> kHighlightColors = {
     QColor("#b48ef0"), // 5 purple
 };
 
-// The highlights of one PDF, stored in ~/.local/share/folio/highlights/ under a
-// key derived from the file's contents, so they follow the file if it moves.
-class Highlights {
-public:
-    explicit Highlights(const QString& pdfPath);
-
-    const QList<Highlight>& all() const { return m_list; }
-    void add(const Highlight& h);
-    void remove(int index);
-    void setColor(int index, int color);
-
-private:
-    void save() const;
-
-    QString m_file;
-    QString m_pdfPath; // informational, stored alongside
-    QList<Highlight> m_list;
-};
+// Older versions of folio kept highlights in ~/.local/share/folio/highlights/
+// instead of in the PDF. Returns those for `pdfPath` (ids unset), and the file
+// they came from so it can be retired once they're written into the PDF.
+QList<Highlight> legacyHighlights(const QString& pdfPath, QString* storeFile);

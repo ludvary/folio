@@ -25,11 +25,9 @@ constexpr int kHighlightAlpha = 110;
 constexpr int kAutoScrollZone = 40; // px from the top/bottom edge where dragging scrolls
 } // namespace
 
-PageView::PageView(std::shared_ptr<Document> doc, std::shared_ptr<Highlights> highlights, int startPage,
-                   QWidget* parent)
+PageView::PageView(std::shared_ptr<Document> doc, int startPage, QWidget* parent)
     : QAbstractScrollArea(parent),
       m_doc(std::move(doc)),
-      m_highlights(std::move(highlights)),
       m_pendingTarget(LinkTarget{startPage, {NAN, NAN}})
 {
     setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -274,14 +272,14 @@ void PageView::paintEvent(QPaintEvent*)
             p.drawImage(rect.topLeft(), img);
     }
 
-    const QList<Highlight>& highlights = m_highlights->all();
+    const QList<Highlight>& highlights = m_doc->highlights();
     for (int h = 0; h < highlights.size(); ++h) {
         if (highlights[h].page < first || highlights[h].page > last)
             continue;
-        QColor fill = kHighlightColors[highlights[h].color];
+        QColor fill = highlights[h].color;
         fill.setAlpha(kHighlightAlpha);
         p.setBrush(fill);
-        p.setPen(h == m_selectedHighlight ? QPen(kHighlightColors[highlights[h].color], 2) : QPen(Qt::NoPen));
+        p.setPen(h == m_selectedHighlight ? QPen(highlights[h].color, 2) : QPen(Qt::NoPen));
         drawQuads(p, highlights[h].page, highlights[h].quads);
     }
 
@@ -415,8 +413,8 @@ void PageView::copySelection()
     QString text;
     if (hasSelection())
         text = selectedText();
-    else if (m_selectedHighlight >= 0 && m_selectedHighlight < m_highlights->all().size())
-        text = m_highlights->all()[m_selectedHighlight].text;
+    else if (m_selectedHighlight >= 0 && m_selectedHighlight < m_doc->highlights().size())
+        text = m_doc->highlightText(m_doc->highlights()[m_selectedHighlight]);
     if (text.isEmpty())
         return;
     QApplication::clipboard()->setText(text);
@@ -427,6 +425,7 @@ void PageView::copySelection()
 void PageView::highlightSelection(int color)
 {
     // One highlight per page the selection covers.
+    QList<Highlight> added;
     for (int page = std::min(m_selStartPage, m_selEndPage); page <= std::max(m_selStartPage, m_selEndPage); ++page) {
         const auto range = selectionOn(page);
         if (!range)
@@ -434,11 +433,12 @@ void PageView::highlightSelection(int color)
         Highlight h;
         h.page = page;
         h.quads = m_doc->selectionQuads(page, range->first, range->second, m_selMode);
-        h.text = m_doc->selectionText(page, range->first, range->second, m_selMode).trimmed();
-        h.color = color;
+        h.color = kHighlightColors[color];
         if (!h.quads.isEmpty())
-            m_highlights->add(h);
+            added.append(h);
     }
+    if (const QString error = m_doc->addHighlights(added); !error.isEmpty())
+        emit message(error);
     clearSelection();
 }
 
@@ -461,7 +461,7 @@ void PageView::autoScroll()
 
 int PageView::highlightAt(int page, QPointF point) const
 {
-    const QList<Highlight>& all = m_highlights->all();
+    const QList<Highlight>& all = m_doc->highlights();
     for (int h = all.size() - 1; h >= 0; --h) // topmost first
         if (all[h].page == page)
             for (const QPolygonF& quad : all[h].quads)
@@ -578,7 +578,7 @@ void PageView::showLinkPreview(const LinkTarget& target, QPoint globalPos)
 
     // A second view of the same document, so text in it can be selected,
     // copied and scrolled like anywhere else.
-    auto* view = new PageView(m_doc, m_highlights, target.page, preview);
+    auto* view = new PageView(m_doc, target.page, preview);
     view->m_inPreview = true;
     view->setTheme(m_theme);
     view->showTarget(target, m_zoom);
@@ -788,10 +788,13 @@ void PageView::keyPressEvent(QKeyEvent* event)
         if (hasSelection())
             highlightSelection(m_lastColor);
         else if (m_selectedHighlight >= 0)
-            m_highlights->setColor(m_selectedHighlight, m_lastColor);
+            if (const QString error = m_doc->setHighlightColor(m_selectedHighlight, kHighlightColors[m_lastColor]);
+                !error.isEmpty())
+                emit message(error);
         viewport()->update();
     } else if (c == 'x' && m_selectedHighlight >= 0) {
-        m_highlights->remove(m_selectedHighlight);
+        if (const QString error = m_doc->removeHighlight(m_selectedHighlight); !error.isEmpty())
+            emit message(error);
         m_selectedHighlight = -1;
         viewport()->update();
     } else if (c == 'y') {

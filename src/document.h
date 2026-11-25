@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <QColor>
+#include <QDateTime>
 #include <QImage>
 #include <QList>
 #include <QPointF>
@@ -23,6 +25,14 @@ struct LinkTarget {
 };
 
 enum class SelectMode { Chars, Words };
+
+// A PDF highlight annotation (ours or one made in any other app).
+struct Highlight {
+    int page = 0;
+    QList<QPolygonF> quads; // page coordinates
+    QColor color;
+    int id = 0;             // PDF object number, to find the annotation again
+};
 
 // One line of text as MuPDF groups it, with a box per character (text[i] <-> chars[i]).
 struct TextLine {
@@ -58,15 +68,37 @@ public:
     // Matches may span line breaks (lines are joined with a space).
     QList<QList<QRectF>> search(int page, const QString& query, Qt::CaseSensitivity cs) const;
 
+    // Highlights are standard PDF highlight annotations saved into the file
+    // itself, so they sync with it and show up in other viewers. Pages are
+    // rendered without them; the view draws them in its own style.
+    bool canAnnotate() const;
+    const QList<Highlight>& highlights() const { return m_highlights; }
+    QString highlightText(const Highlight& h) const;
+    // These save the file and return an error message on failure.
+    QString addHighlights(const QList<Highlight>& highlights); // id is filled in
+    QString removeHighlight(int index);
+    QString setHighlightColor(int index, const QColor& color);
+
     // Target of the internal link under `point`, if any.
     std::optional<LinkTarget> linkAt(int page, QPointF point) const;
 
 private:
     struct TextCache;
 
+    QString checkUnchanged() const; // refuse to save over a file changed elsewhere
+    QString save();   // also reloads, see save()
+    QString reload();
+    void rememberFileState();
+    template <typename Fn> QString editAnnotation(const Highlight& h, Fn fn);
+
     fz_context* m_ctx = nullptr;
     fz_document* m_doc = nullptr;
     std::vector<QRectF> m_pageBounds;
     double m_maxPageWidth = 0;
     std::unique_ptr<TextCache> m_text;
+
+    QString m_path;
+    QList<Highlight> m_highlights;
+    QDateTime m_fileTime; // as of opening or our last save
+    qint64 m_fileSize = 0;
 };

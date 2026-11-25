@@ -283,9 +283,9 @@ void MainWindow::editColors()
 bool MainWindow::openFile(const QString& path)
 {
     const QString absolute = QFileInfo(path).absoluteFilePath();
-    std::unique_ptr<Document> doc;
+    std::shared_ptr<Document> doc;
     try {
-        doc = std::make_unique<Document>(absolute);
+        doc = std::make_shared<Document>(absolute);
     } catch (const std::exception& e) {
         QMessageBox::warning(this, "folio", QString("Could not open %1:\n%2").arg(absolute, e.what()));
         return false;
@@ -293,8 +293,17 @@ bool MainWindow::openFile(const QString& path)
 
     rememberPosition(); // of the document we're leaving
     const Recents::Entry saved = m_recents.entryFor(absolute);
-    m_highlights = std::make_shared<Highlights>(absolute);
-    auto* view = new PageView(std::move(doc), m_highlights, saved.page); // both shared with link previews
+
+    // One-time move of highlights from folio's old store into the PDF itself.
+    QString legacyStore;
+    QString importError;
+    if (const QList<Highlight> legacy = legacyHighlights(absolute, &legacyStore); !legacy.isEmpty()) {
+        importError = doc->addHighlights(legacy);
+        if (importError.isEmpty())
+            QFile::rename(legacyStore, legacyStore + ".imported");
+    }
+
+    auto* view = new PageView(std::move(doc), saved.page); // shared with link previews
     view->setTheme(pageTheme());
     view->setDualPage(saved.dualPage, saved.firstPageOnRight);
     delete m_splitter->replaceWidget(1, view);
@@ -305,6 +314,8 @@ bool MainWindow::openFile(const QString& path)
     connect(view, &PageView::message, m_status, &StatusBar::showMessage);
     m_status->setFile(QFileInfo(absolute).fileName());
     updateStatus();
+    if (!importError.isEmpty())
+        m_status->showMessage(importError);
     setWindowTitle(QFileInfo(absolute).fileName() + " — folio");
     m_view->setFocus();
     return true;
@@ -346,14 +357,15 @@ void MainWindow::showHighlightList()
     if (!m_view)
         return;
     m_finderShowsFiles = false;
-    QList<Highlight> sorted = m_highlights->all();
+    const Document& doc = m_view->document();
+    QList<Highlight> sorted = doc.highlights();
     std::stable_sort(sorted.begin(), sorted.end(), [](const Highlight& a, const Highlight& b) {
         return a.page < b.page;
     });
     QList<FuzzyFinder::Item> items;
     for (const Highlight& h : sorted) {
         const QPointF at = h.quads.first().boundingRect().topLeft();
-        items.append({QString("p.%1   %2").arg(h.page + 1).arg(h.text.simplified()),
+        items.append({QString("p.%1   %2").arg(h.page + 1).arg(doc.highlightText(h)),
                       QString("%1 %2 %3").arg(h.page).arg(at.x()).arg(at.y())});
     }
     m_finder->popup(items, "Highlights…", [this](const QString& value) {
